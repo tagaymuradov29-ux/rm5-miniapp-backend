@@ -58,6 +58,43 @@ async def health():
         raise HTTPException(status_code=500, detail=f"DB xato: {str(e)}")
 
 
+@app.get("/api/auth/me")
+async def get_auth_me(telegram_id: int, session: AsyncSession = Depends(get_db)):
+    """Telegram ID asosida user va role qaytaradi"""
+    try:
+        user_row = (await session.execute(
+            text("""
+                SELECT u.id, u.telegram_id, u.full_name, u.username, u.role, u.status,
+                       u.group_id, g.name AS group_name,
+                       curator.full_name AS curator_name
+                FROM users u
+                LEFT JOIN groups g ON g.id = u.group_id
+                LEFT JOIN users curator ON curator.id = g.curator_id
+                WHERE u.telegram_id = :tg_id
+            """),
+            {"tg_id": telegram_id},
+        )).fetchone()
+        
+        if not user_row:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        return {
+            "user_id": user_row.id,
+            "telegram_id": user_row.telegram_id,
+            "full_name": user_row.full_name,
+            "username": user_row.username,
+            "role": user_row.role,
+            "status": user_row.status,
+            "group_id": user_row.group_id,
+            "group_name": user_row.group_name,
+            "curator_name": user_row.curator_name,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
+
+
 @app.get("/api/stats")
 async def get_stats(session: AsyncSession = Depends(get_db)):
     try:
