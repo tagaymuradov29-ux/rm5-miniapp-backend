@@ -202,6 +202,52 @@ async def get_admin_dashboard(session: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
 
 
+@app.get("/api/admin/students")
+async def get_admin_students(session: AsyncSession = Depends(get_db)):
+    """Hamma tasdiqlangan o'quvchilar ro'yxati ballar bilan"""
+    try:
+        # 46 ta student + group + curator + ball
+        students_res = await session.execute(text("""
+            SELECT 
+                u.id, u.telegram_id, u.full_name, u.username,
+                g.id AS group_id, g.name AS group_name,
+                c.full_name AS curator_name,
+                COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED'), 0) AS sub_score,
+                COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0) AS test_score,
+                COALESCE((SELECT SUM(score) FROM workshop_scores WHERE user_id = u.id), 0) AS workshop_score,
+                COALESCE((SELECT SUM(score) FROM story_reports WHERE user_id = u.id AND status = 'APPROVED'), 0) AS story_score,
+                COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id), 0) AS bonus_score
+            FROM users u
+            LEFT JOIN groups g ON g.id = u.group_id
+            LEFT JOIN users c ON c.id = g.curator_id
+            WHERE u.role = 'STUDENT' AND u.status = 'APPROVED'
+            ORDER BY u.full_name
+        """))
+        
+        students = []
+        for row in students_res.fetchall():
+            total = int(row.sub_score) + int(row.test_score) + int(row.workshop_score) + int(row.story_score) + int(row.bonus_score)
+            students.append({
+                "id": row.id,
+                "telegram_id": row.telegram_id,
+                "full_name": row.full_name,
+                "username": row.username,
+                "group_id": row.group_id,
+                "group_name": row.group_name,
+                "curator_name": row.curator_name,
+                "total_score": total,
+            })
+        
+        # Reyting hisoblash
+        sorted_by_score = sorted(students, key=lambda s: s["total_score"], reverse=True)
+        for i, s in enumerate(sorted_by_score):
+            s["rank"] = i + 1
+        
+        return {"students": sorted_by_score, "max_total": 1970}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
+
+
 @app.get("/api/admin/users/stats")
 async def get_admin_users_stats(session: AsyncSession = Depends(get_db)):
     """Foydalanuvchilar bo'limi ustun statistikalari"""
