@@ -202,6 +202,123 @@ async def get_admin_dashboard(session: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
 
 
+@app.get("/api/admin/trend")
+async def get_admin_trend(
+    task_type: str = "all",
+    group_id: int = None,
+    session: AsyncSession = Depends(get_db),
+):
+    """Trend analytics"""
+    try:
+        if task_type == "konspekt":
+            score_expr = "(SELECT COALESCE(AVG(score), 0) FROM submissions WHERE lesson_id = l.id AND status = 'APPROVED' AND type = 'KONSPEKT'"
+            count_expr = "(SELECT COUNT(*) FROM submissions WHERE lesson_id = l.id AND status = 'APPROVED' AND type = 'KONSPEKT'"
+            max_score = 10
+        elif task_type == "workbook":
+            score_expr = "(SELECT COALESCE(AVG(score), 0) FROM submissions WHERE lesson_id = l.id AND status = 'APPROVED' AND type = 'WORKBOOK'"
+            count_expr = "(SELECT COUNT(*) FROM submissions WHERE lesson_id = l.id AND status = 'APPROVED' AND type = 'WORKBOOK'"
+            max_score = 20
+        elif task_type == "amaliy":
+            score_expr = "(SELECT COALESCE(AVG(score), 0) FROM submissions WHERE lesson_id = l.id AND status = 'APPROVED' AND type = 'AMALIY'"
+            count_expr = "(SELECT COUNT(*) FROM submissions WHERE lesson_id = l.id AND status = 'APPROVED' AND type = 'AMALIY'"
+            max_score = 50
+        elif task_type == "test":
+            score_expr = "(SELECT COALESCE(AVG(score), 0) FROM test_scores WHERE lesson_id = l.id"
+            count_expr = "(SELECT COUNT(*) FROM test_scores WHERE lesson_id = l.id"
+            max_score = 20
+        elif task_type == "workshop":
+            score_expr = "(SELECT COALESCE(AVG(score), 0) FROM workshop_scores WHERE lesson_id = l.id"
+            count_expr = "(SELECT COUNT(*) FROM workshop_scores WHERE lesson_id = l.id"
+            max_score = 50
+        elif task_type == "stories":
+            score_expr = "(SELECT COALESCE(AVG(score), 0) FROM story_reports WHERE lesson_id = l.id AND status = 'APPROVED'"
+            count_expr = "(SELECT COUNT(*) FROM story_reports WHERE lesson_id = l.id AND status = 'APPROVED'"
+            max_score = 25
+        elif task_type == "reels":
+            score_expr = "(SELECT COALESCE(AVG(score), 0) FROM submissions WHERE lesson_id = l.id AND status = 'APPROVED' AND type = 'INSTAGRAM_REELS'"
+            count_expr = "(SELECT COUNT(*) FROM submissions WHERE lesson_id = l.id AND status = 'APPROVED' AND type = 'INSTAGRAM_REELS'"
+            max_score = 25
+        else:
+            score_expr = "(SELECT COALESCE(AVG(score), 0) FROM submissions WHERE lesson_id = l.id AND status = 'APPROVED'"
+            count_expr = "(SELECT COUNT(*) FROM submissions WHERE lesson_id = l.id AND status = 'APPROVED'"
+            max_score = 100
+        
+        group_filter = ""
+        params = {}
+        if group_id:
+            group_filter = " AND user_id IN (SELECT id FROM users WHERE group_id = :gid)"
+            params["gid"] = group_id
+        
+        score_expr += group_filter + ")"
+        count_expr += group_filter + ")"
+        
+        sql = f"""
+            SELECT 
+                l.lesson_number,
+                l.title,
+                l.is_unlocked,
+                ROUND({score_expr}::numeric, 1) AS avg_score,
+                {count_expr} AS submission_count
+            FROM lessons l
+            ORDER BY l.lesson_number
+        """
+        
+        rows = (await session.execute(text(sql), params)).fetchall()
+        
+        lessons = []
+        for row in rows:
+            lessons.append({
+                "lesson_number": row.lesson_number,
+                "title": row.title,
+                "is_unlocked": row.is_unlocked,
+                "avg_score": float(row.avg_score or 0),
+                "count": int(row.submission_count or 0),
+                "max_score": max_score,
+            })
+        
+        unlocked_with_data = [l for l in lessons if l["is_unlocked"] and l["count"] > 0]
+        
+        best_lesson = max(unlocked_with_data, key=lambda x: x["avg_score"]) if unlocked_with_data else None
+        worst_lesson = min(unlocked_with_data, key=lambda x: x["avg_score"]) if unlocked_with_data else None
+        
+        biggest_rise = None
+        biggest_drop = None
+        max_rise_pct = 0
+        max_drop_pct = 0
+        for i in range(1, len(unlocked_with_data)):
+            prev = unlocked_with_data[i-1]
+            curr = unlocked_with_data[i]
+            if prev["avg_score"] > 0:
+                change_pct = ((curr["avg_score"] - prev["avg_score"]) / prev["avg_score"]) * 100
+                if change_pct > max_rise_pct:
+                    max_rise_pct = change_pct
+                    biggest_rise = {"from": prev["lesson_number"], "to": curr["lesson_number"], "percent": round(change_pct, 1)}
+                if change_pct < max_drop_pct:
+                    max_drop_pct = change_pct
+                    biggest_drop = {"from": prev["lesson_number"], "to": curr["lesson_number"], "percent": round(change_pct, 1)}
+        
+        total_students_sql = "SELECT COUNT(*) AS c FROM users WHERE role = 'STUDENT' AND status = 'APPROVED'"
+        if group_id:
+            total_students_sql += " AND group_id = :gid"
+        total_students = (await session.execute(text(total_students_sql), {"gid": group_id} if group_id else {})).fetchone()
+        
+        return {
+            "task_type": task_type,
+            "group_id": group_id,
+            "lessons": lessons,
+            "insights": {
+                "best_lesson": best_lesson,
+                "worst_lesson": worst_lesson,
+                "biggest_rise": biggest_rise,
+                "biggest_drop": biggest_drop,
+            },
+            "total_students": int(total_students.c or 0),
+            "max_score": max_score,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Xato: " + str(e))
+
+
 @app.get("/api/admin/groups")
 async def get_admin_groups(session: AsyncSession = Depends(get_db)):
     """4 ta guruh ma'lumotlari (bot formulasi bilan)"""
