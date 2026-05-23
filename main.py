@@ -275,7 +275,8 @@ async def get_student_ranking(telegram_id: int, session: AsyncSession = Depends(
                     COALESCE(s.subs_total, 0) + 
                     COALESCE(t.test_total, 0) + 
                     COALESCE(w.workshop_total, 0) + 
-                    COALESCE(ig.ig_total, 0) AS total
+                    COALESCE(sr.story_total, 0) +
+                    COALESCE(b.bonus_total, 0) AS total
                 FROM users u
                 LEFT JOIN groups g ON g.id = u.group_id
                 LEFT JOIN (
@@ -294,10 +295,15 @@ async def get_student_ranking(telegram_id: int, session: AsyncSession = Depends(
                     GROUP BY user_id
                 ) w ON w.user_id = u.id
                 LEFT JOIN (
-                    SELECT user_id, SUM(week_total) AS ig_total 
-                    FROM instagram_weeks 
+                    SELECT user_id, SUM(score) AS story_total 
+                    FROM story_reports WHERE status = 'APPROVED'
                     GROUP BY user_id
-                ) ig ON ig.user_id = u.id
+                ) sr ON sr.user_id = u.id
+                LEFT JOIN (
+                    SELECT user_id, SUM(amount) AS bonus_total 
+                    FROM bonus_points
+                    GROUP BY user_id
+                ) b ON b.user_id = u.id
                 WHERE u.role = 'STUDENT' AND u.status = 'APPROVED'
                 ORDER BY total DESC
             """)
