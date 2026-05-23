@@ -251,6 +251,110 @@ async def get_student_lessons(telegram_id: int, session: AsyncSession = Depends(
         raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
 
 
+@app.get("/api/student/{telegram_id}/lesson/{lesson_id}")
+async def get_lesson_details(telegram_id: int, lesson_id: int, session: AsyncSession = Depends(get_db)):
+    """Bitta dars batafsil ma'lumotlari"""
+    try:
+        user_row = (await session.execute(
+            text("SELECT id, full_name FROM users WHERE telegram_id = :tg_id"),
+            {"tg_id": telegram_id},
+        )).fetchone()
+        
+        if not user_row:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        user_id = user_row.id
+
+        # Dars ma'lumotlari
+        lesson_row = (await session.execute(
+            text("""
+                SELECT id, lesson_number, title, lesson_date, is_unlocked, speaker,
+                       workbook_file_id, workbook_deadline,
+                       has_practical
+                FROM lessons
+                WHERE id = :lid
+            """),
+            {"lid": lesson_id},
+        )).fetchone()
+        
+        if not lesson_row:
+            raise HTTPException(status_code=404, detail="Dars topilmadi")
+
+        # Submissionlar to'liq (feedback, reviewer, sana bilan)
+        subs_result = await session.execute(
+            text("""
+                SELECT s.type, s.status, s.score, s.max_score, s.feedback,
+                       s.submitted_at, s.reviewed_at, s.is_late,
+                       r.full_name AS reviewer_name
+                FROM submissions s
+                LEFT JOIN users r ON r.id = s.reviewer_id
+                WHERE s.user_id = :uid AND s.lesson_id = :lid
+                ORDER BY s.submitted_at DESC
+            """),
+            {"uid": user_id, "lid": lesson_id},
+        )
+        
+        subs_by_type = {}
+        for row in subs_result.fetchall():
+            t = row.type
+            if t not in subs_by_type:
+                subs_by_type[t] = {
+                    "status": row.status,
+                    "score": row.score or 0,
+                    "max_score": row.max_score or 0,
+                    "feedback": row.feedback,
+                    "submitted_at": row.submitted_at.isoformat() if row.submitted_at else None,
+                    "reviewed_at": row.reviewed_at.isoformat() if row.reviewed_at else None,
+                    "is_late": row.is_late or False,
+                    "reviewer_name": row.reviewer_name,
+                }
+
+        # Test score
+        test_row = (await session.execute(
+            text("SELECT score FROM test_scores WHERE user_id = :uid AND lesson_id = :lid"),
+            {"uid": user_id, "lid": lesson_id},
+        )).fetchone()
+        
+        # Jami ball (shu dars uchun)
+        konspekt_score = (subs_by_type.get("KONSPEKT") or {}).get("score", 0)
+        workbook_score = (subs_by_type.get("WORKBOOK") or {}).get("score", 0)
+        amaliy_score = (subs_by_type.get("AMALIY") or {}).get("score", 0)
+        test_score = test_row.score if test_row else 0
+        total_earned = konspekt_score + workbook_score + amaliy_score + test_score
+        
+        # Max ball (shu dars uchun)
+        max_total = 10  # Konspekt
+        if lesson_row.workbook_file_id:
+            max_total += 20  # Workbook
+        if lesson_row.has_practical:
+            max_total += 50  # Amaliy
+        max_total += 20  # Test
+
+        return {
+            "lesson_id": lesson_row.id,
+            "lesson_number": lesson_row.lesson_number,
+            "title": lesson_row.title,
+            "lesson_date": lesson_row.lesson_date.isoformat() if lesson_row.lesson_date else None,
+            "is_unlocked": lesson_row.is_unlocked,
+            "speaker": lesson_row.speaker,
+            "has_workbook": lesson_row.workbook_file_id is not None,
+            "has_practical": lesson_row.has_practical,
+            "workbook_deadline": lesson_row.workbook_deadline.isoformat() if lesson_row.workbook_deadline else None,
+            "total_earned": total_earned,
+            "max_total": max_total,
+            "submissions": {
+                "konspekt": subs_by_type.get("KONSPEKT"),
+                "workbook": subs_by_type.get("WORKBOOK") if lesson_row.workbook_file_id else None,
+                "amaliy": subs_by_type.get("AMALIY") if lesson_row.has_practical else None,
+                "test": {"score": test_row.score} if test_row else None,
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
+
+
 @app.get("/api/student/{telegram_id}/ranking")
 async def get_student_ranking(telegram_id: int, session: AsyncSession = Depends(get_db)):
     """O'quvchi reytingi (guruh va kursda)"""
