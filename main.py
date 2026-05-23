@@ -202,6 +202,55 @@ async def get_admin_dashboard(session: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
 
 
+@app.get("/api/admin/groups")
+async def get_admin_groups(session: AsyncSession = Depends(get_db)):
+    """4 ta guruh ma'lumotlari (bot formulasi bilan)"""
+    try:
+        rows = (await session.execute(text(
+            "SELECT g.id, g.name, "
+            "c.id AS curator_id, c.full_name AS curator_name, c.telegram_id AS curator_tg, c.username AS curator_username, "
+            "(SELECT COUNT(*) FROM users WHERE group_id = g.id AND status = 'APPROVED' AND role = 'STUDENT') AS students_count, "
+            "COALESCE(("
+            "  SELECT ROUND(AVG(total_score)) FROM ("
+            "    SELECT "
+            "      COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED'), 0) + "
+            "      COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0) + "
+            "      COALESCE((SELECT SUM(score) FROM workshop_scores WHERE user_id = u.id), 0) + "
+            "      COALESCE((SELECT SUM(score) FROM story_reports WHERE user_id = u.id AND status = 'APPROVED'), 0) + "
+            "      COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id), 0) AS total_score "
+            "    FROM users u WHERE u.group_id = g.id AND u.status = 'APPROVED' AND u.role = 'STUDENT'"
+            "  ) sub"
+            "), 0) AS avg_score "
+            "FROM groups g "
+            "LEFT JOIN users c ON c.id = g.curator_id "
+            "ORDER BY g.id"
+        ))).fetchall()
+        
+        groups = []
+        for row in rows:
+            groups.append({
+                "id": row.id,
+                "name": row.name,
+                "curator_id": row.curator_id,
+                "curator_name": row.curator_name,
+                "curator_telegram_id": row.curator_tg,
+                "curator_username": row.curator_username,
+                "students_count": int(row.students_count or 0),
+                "avg_score": int(row.avg_score or 0),
+            })
+        
+        # Saralash: avg_score bo'yicha (rank uchun)
+        sorted_groups = sorted(groups, key=lambda g: g["avg_score"], reverse=True)
+        for i, g in enumerate(sorted_groups):
+            g["rank"] = i + 1
+        
+        return {"groups": sorted_groups}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Xato: " + str(e))
+
+
 @app.get("/api/admin/student/{user_id}")
 async def get_admin_student_detail(user_id: int, session: AsyncSession = Depends(get_db)):
     """Bot bilan bir xil ball formulasi"""
