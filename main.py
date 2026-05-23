@@ -355,6 +355,145 @@ async def get_lesson_details(telegram_id: int, lesson_id: int, session: AsyncSes
         raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
 
 
+@app.get("/api/student/{telegram_id}/dashboard")
+async def get_student_dashboard(telegram_id: int, session: AsyncSession = Depends(get_db)):
+    """Bosh sahifa uchun barcha qo'shimcha ma'lumotlar"""
+    try:
+        user_row = (await session.execute(
+            text("SELECT id FROM users WHERE telegram_id = :tg_id"),
+            {"tg_id": telegram_id},
+        )).fetchone()
+        
+        if not user_row:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        user_id = user_row.id
+
+        # 1. Upcoming lesson - keyingi unlocked dars (yoki bugundan keyingi)
+        upcoming_lesson = (await session.execute(
+            text("""
+                SELECT id, lesson_number, title, lesson_date, speaker
+                FROM lessons
+                WHERE lesson_date > NOW()
+                ORDER BY lesson_date ASC
+                LIMIT 1
+            """)
+        )).fetchone()
+        
+        upcoming = None
+        if upcoming_lesson:
+            upcoming = {
+                "lesson_id": upcoming_lesson.id,
+                "lesson_number": upcoming_lesson.lesson_number,
+                "title": upcoming_lesson.title,
+                "lesson_date": upcoming_lesson.lesson_date.isoformat() if upcoming_lesson.lesson_date else None,
+                "speaker": upcoming_lesson.speaker,
+            }
+
+        # 2. Recent activity - oxirgi 5 ta submission (APPROVED status uchun)
+        recent_subs = await session.execute(
+            text("""
+                SELECT s.type, s.status, s.score, s.reviewed_at,
+                       l.lesson_number, l.title AS lesson_title
+                FROM submissions s
+                LEFT JOIN lessons l ON l.id = s.lesson_id
+                WHERE s.user_id = :uid
+                ORDER BY COALESCE(s.reviewed_at, s.submitted_at) DESC
+                LIMIT 5
+            """),
+            {"uid": user_id},
+        )
+        
+        recent_activity = []
+        for row in recent_subs.fetchall():
+            recent_activity.append({
+                "type": row.type,
+                "status": row.status,
+                "score": row.score or 0,
+                "lesson_number": row.lesson_number,
+                "lesson_title": row.lesson_title,
+                "reviewed_at": row.reviewed_at.isoformat() if row.reviewed_at else None,
+            })
+
+        # 3. Weekly activity - oxirgi 7 kun uchun story bormi
+        weekly = await session.execute(
+            text("""
+                SELECT DATE(report_date) AS day, COUNT(*) AS cnt
+                FROM story_reports
+                WHERE user_id = :uid AND report_date >= NOW() - INTERVAL '7 days'
+                GROUP BY DATE(report_date)
+            """),
+            {"uid": user_id},
+        )
+        
+        days_with_story = set()
+        for row in weekly.fetchall():
+            days_with_story.add(str(row.day))
+        
+        from datetime import datetime, timedelta
+        today = datetime.now().date()
+        weekly_activity = []
+        day_labels = ["D", "S", "CH", "P", "J", "SH", "Y"]  # Dush, Sesh, Chor, Pay, Jum, Shan, Yak
+        # Pythonda weekday(): 0=Dushanba, 6=Yakshanba
+        for i in range(7):
+            day = today - timedelta(days=6 - i)
+            weekly_activity.append({
+                "label": day_labels[day.weekday()],
+                "date": day.isoformat(),
+                "active": str(day) in days_with_story,
+            })
+        active_days_count = sum(1 for d in weekly_activity if d["active"])
+
+        # 4. Attendance summary
+        att = (await session.execute(
+            text("""
+                SELECT 
+                    SUM(CASE WHEN status = 'PRESENT' THEN 1 ELSE 0 END) AS present,
+                    SUM(CASE WHEN status = 'LATE' THEN 1 ELSE 0 END) AS late,
+                    SUM(CASE WHEN status = 'ABSENT' THEN 1 ELSE 0 END) AS absent
+                FROM lesson_attendance
+                WHERE user_id = :uid
+            """),
+            {"uid": user_id},
+        )).fetchone()
+        
+        attendance = {
+            "present": int(att.present or 0),
+            "late": int(att.late or 0),
+            "absent": int(att.absent or 0),
+        }
+
+        # 5. Fines
+        fines_row = (await session.execute(
+            text("""
+                SELECT 
+                    COALESCE(SUM(CASE WHEN status = 'UNPAID' THEN amount_uzs ELSE 0 END), 0) AS unpaid,
+                    COALESCE(SUM(CASE WHEN status = 'PAID' THEN amount_uzs ELSE 0 END), 0) AS paid
+                FROM fines
+                WHERE user_id = :uid
+            """),
+            {"uid": user_id},
+        )).fetchone()
+        
+        fines = {
+            "unpaid_uzs": int(fines_row.unpaid or 0),
+            "paid_uzs": int(fines_row.paid or 0),
+        }
+
+        return {
+            "upcoming_lesson": upcoming,
+            "recent_activity": recent_activity,
+            "weekly_activity": weekly_activity,
+            "active_days_count": active_days_count,
+            "attendance": attendance,
+            "fines": fines,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
+
+
 @app.get("/api/student/{telegram_id}/ranking")
 async def get_student_ranking(telegram_id: int, session: AsyncSession = Depends(get_db)):
     """O'quvchi reytingi (guruh va kursda)"""
