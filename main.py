@@ -204,18 +204,27 @@ async def get_admin_dashboard(session: AsyncSession = Depends(get_db)):
 
 @app.get("/api/admin/student/{user_id}")
 async def get_admin_student_detail(user_id: int, session: AsyncSession = Depends(get_db)):
+    """Bot bilan bir xil ball formulasi"""
     try:
         row = (await session.execute(text(
             "SELECT u.id, u.telegram_id, u.full_name, u.username, u.phone, u.registered_at, "
             "g.id AS group_id, g.name AS group_name, c.full_name AS curator_name, "
-            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'KONSPEKT'), 0) AS konspekt, "
-            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'WORKBOOK'), 0) AS workbook, "
-            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'AMALIY'), 0) AS amaliy, "
-            "COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0) AS test, "
-            "COALESCE((SELECT SUM(score) FROM workshop_scores WHERE user_id = u.id), 0) AS workshop, "
-            "COALESCE((SELECT SUM(score) FROM story_reports WHERE user_id = u.id AND status = 'APPROVED'), 0) AS stories, "
-            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'INSTAGRAM_REELS'), 0) AS reels, "
-            "COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id), 0) AS bonus, "
+            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'KONSPEKT'), 0) + "
+            "  COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id AND submission_type = 'konspekt'), 0) AS konspekt, "
+            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'WORKBOOK'), 0) + "
+            "  COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id AND submission_type = 'workbook'), 0) AS workbook, "
+            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'AMALIY'), 0) + "
+            "  COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id AND submission_type = 'amaliy'), 0) AS amaliy, "
+            "COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0) + "
+            "  COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id AND submission_type = 'test'), 0) AS test, "
+            "COALESCE((SELECT SUM(score) FROM workshop_scores WHERE user_id = u.id), 0) + "
+            "  COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id AND submission_type = 'workshop'), 0) AS workshop, "
+            "COALESCE((SELECT SUM(score) FROM story_reports WHERE user_id = u.id AND status = 'APPROVED'), 0) + "
+            "  COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'INSTAGRAM_STORIES'), 0) + "
+            "  COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id AND submission_type = 'stories'), 0) AS stories, "
+            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'INSTAGRAM_REELS'), 0) + "
+            "  COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id AND submission_type = 'reels'), 0) AS reels, "
+            "COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id AND submission_type = 'extra'), 0) AS bonus, "
             "(SELECT COUNT(*) FROM lesson_attendance WHERE user_id = u.id AND status = 'ON_TIME') AS att_present, "
             "(SELECT COUNT(*) FROM lesson_attendance WHERE user_id = u.id AND status IN ('LATE_TIER_1','LATE_TIER_2','LATE_TIER_3')) AS att_late, "
             "(SELECT COUNT(*) FROM lesson_attendance WHERE user_id = u.id AND status = 'ABSENT') AS att_absent, "
@@ -246,6 +255,7 @@ async def get_admin_student_detail(user_id: int, session: AsyncSession = Depends
             "FROM users u WHERE u.role = 'STUDENT' AND u.status = 'APPROVED') "
             "SELECT COUNT(*) + 1 AS rank FROM all_scores WHERE total > (SELECT total FROM all_scores WHERE id = :uid)"
         ), {"uid": user_id})).fetchone()
+        # Note: rank bot bilan bir xil - bonus_points har turi
         
         return {
             "id": row.id,
@@ -280,7 +290,7 @@ async def get_admin_student_detail(user_id: int, session: AsyncSession = Depends
 async def get_admin_students(session: AsyncSession = Depends(get_db)):
     """Hamma tasdiqlangan o'quvchilar ro'yxati ballar bilan"""
     try:
-        # 46 ta student + group + curator + ball
+        # 46 ta student + bot formulasi
         students_res = await session.execute(text("""
             SELECT 
                 u.id, u.telegram_id, u.full_name, u.username,
@@ -300,6 +310,8 @@ async def get_admin_students(session: AsyncSession = Depends(get_db)):
         
         students = []
         for row in students_res.fetchall():
+            # Bot formulasi: sub_score'da KONSPEKT+WORKBOOK+AMALIY+REELS+STORIES_OLD bor
+            # bonus_score'da hammasi yig'ilgan (har turi uchun)
             total = int(row.sub_score) + int(row.test_score) + int(row.workshop_score) + int(row.story_score) + int(row.bonus_score)
             students.append({
                 "id": row.id,
