@@ -202,6 +202,80 @@ async def get_admin_dashboard(session: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
 
 
+@app.get("/api/admin/student/{user_id}")
+async def get_admin_student_detail(user_id: int, session: AsyncSession = Depends(get_db)):
+    try:
+        row = (await session.execute(text(
+            "SELECT u.id, u.telegram_id, u.full_name, u.username, u.phone, u.registered_at, "
+            "g.id AS group_id, g.name AS group_name, c.full_name AS curator_name, "
+            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'KONSPEKT'), 0) AS konspekt, "
+            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'WORKBOOK'), 0) AS workbook, "
+            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'AMALIY'), 0) AS amaliy, "
+            "COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0) AS test, "
+            "COALESCE((SELECT SUM(score) FROM workshop_scores WHERE user_id = u.id), 0) AS workshop, "
+            "COALESCE((SELECT SUM(score) FROM story_reports WHERE user_id = u.id AND status = 'APPROVED'), 0) AS stories, "
+            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'INSTAGRAM_REELS'), 0) AS reels, "
+            "COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id), 0) AS bonus, "
+            "(SELECT COUNT(*) FROM lesson_attendance WHERE user_id = u.id AND status = 'ON_TIME') AS att_present, "
+            "(SELECT COUNT(*) FROM lesson_attendance WHERE user_id = u.id AND status IN ('LATE_TIER_1','LATE_TIER_2','LATE_TIER_3')) AS att_late, "
+            "(SELECT COUNT(*) FROM lesson_attendance WHERE user_id = u.id AND status = 'ABSENT') AS att_absent, "
+            "COALESCE((SELECT SUM(amount_uzs) FROM fines WHERE user_id = u.id AND status = 'UNPAID'), 0) AS fine_unpaid, "
+            "COALESCE((SELECT SUM(amount_uzs) FROM fines WHERE user_id = u.id AND status = 'PAID'), 0) AS fine_paid "
+            "FROM users u LEFT JOIN groups g ON g.id = u.group_id LEFT JOIN users c ON c.id = g.curator_id "
+            "WHERE u.id = :uid"
+        ), {"uid": user_id})).fetchone()
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        scores = {
+            "konspekt": int(row.konspekt), "workbook": int(row.workbook), "amaliy": int(row.amaliy),
+            "test": int(row.test), "workshop": int(row.workshop), "stories": int(row.stories),
+            "reels": int(row.reels), "bonus": int(row.bonus),
+        }
+        total = sum(scores.values())
+        
+        rank_row = (await session.execute(text(
+            "WITH all_scores AS ("
+            "SELECT u.id, "
+            "COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED'), 0) + "
+            "COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0) + "
+            "COALESCE((SELECT SUM(score) FROM workshop_scores WHERE user_id = u.id), 0) + "
+            "COALESCE((SELECT SUM(score) FROM story_reports WHERE user_id = u.id AND status = 'APPROVED'), 0) + "
+            "COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id), 0) AS total "
+            "FROM users u WHERE u.role = 'STUDENT' AND u.status = 'APPROVED') "
+            "SELECT COUNT(*) + 1 AS rank FROM all_scores WHERE total > (SELECT total FROM all_scores WHERE id = :uid)"
+        ), {"uid": user_id})).fetchone()
+        
+        return {
+            "id": row.id,
+            "telegram_id": row.telegram_id,
+            "full_name": row.full_name,
+            "username": row.username,
+            "phone": row.phone,
+            "registered_at": row.registered_at.isoformat() if row.registered_at else None,
+            "group_id": row.group_id,
+            "group_name": row.group_name,
+            "curator_name": row.curator_name,
+            "scores": scores,
+            "total_score": total,
+            "rank": int(rank_row.rank or 1),
+            "attendance": {
+                "present": int(row.att_present or 0),
+                "late": int(row.att_late or 0),
+                "absent": int(row.att_absent or 0),
+            },
+            "fines": {
+                "unpaid_uzs": int(row.fine_unpaid or 0),
+                "paid_uzs": int(row.fine_paid or 0),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Xato: " + str(e))
+
+
 @app.get("/api/admin/students")
 async def get_admin_students(session: AsyncSession = Depends(get_db)):
     """Hamma tasdiqlangan o'quvchilar ro'yxati ballar bilan"""
