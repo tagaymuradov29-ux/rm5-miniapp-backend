@@ -202,6 +202,31 @@ async def get_admin_dashboard(session: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
 
 
+@app.get("/api/admin/users/stats")
+async def get_admin_users_stats(session: AsyncSession = Depends(get_db)):
+    """Foydalanuvchilar bo'limi ustun statistikalari"""
+    try:
+        row = (await session.execute(text("""
+            SELECT 
+                (SELECT COUNT(*) FROM users WHERE status = 'PENDING') AS pending,
+                (SELECT COUNT(*) FROM users WHERE status = 'APPROVED' AND role = 'STUDENT') AS approved_students,
+                (SELECT COUNT(*) FROM groups) AS groups,
+                (SELECT COUNT(*) FROM users WHERE role = 'CURATOR' AND status = 'APPROVED') AS curators,
+                (SELECT COUNT(*) FROM users WHERE role = 'ASSISTANT' AND status = 'APPROVED') AS assistants,
+                (SELECT COUNT(*) FROM users WHERE status = 'REJECTED') AS blocked
+        """))).fetchone()
+        return {
+            "pending": int(row.pending or 0),
+            "approved_students": int(row.approved_students or 0),
+            "groups": int(row.groups or 0),
+            "curators": int(row.curators or 0),
+            "assistants": int(row.assistants or 0),
+            "blocked": int(row.blocked or 0),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
+
+
 @app.get("/api/stats")
 async def get_stats(session: AsyncSession = Depends(get_db)):
     try:
