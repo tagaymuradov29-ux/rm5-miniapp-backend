@@ -144,14 +144,14 @@ async def get_admin_dashboard(session: AsyncSession = Depends(get_db)):
             text("""
                 SELECT 
                     'new_user' AS type,
-                    created_at AS event_time,
+                    approved_at AS event_time,
                     full_name AS user_name,
                     NULL AS score,
                     NULL AS sub_type,
                     NULL AS lesson_num
                 FROM users
-                WHERE status = 'APPROVED' AND role = 'STUDENT'
-                ORDER BY created_at DESC
+                WHERE status = 'APPROVED' AND role = 'STUDENT' AND approved_at IS NOT NULL
+                ORDER BY approved_at DESC
                 LIMIT 3
             """)
         )
