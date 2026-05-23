@@ -95,6 +95,113 @@ async def get_auth_me(telegram_id: int, session: AsyncSession = Depends(get_db))
         raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
 
 
+@app.get("/api/admin/dashboard")
+async def get_admin_dashboard(session: AsyncSession = Depends(get_db)):
+    """Admin bosh sahifa uchun barcha ma'lumotlar"""
+    try:
+        # 1. Hero stats
+        stats_row = (await session.execute(
+            text("""
+                SELECT 
+                    (SELECT COUNT(*) FROM users WHERE role = 'STUDENT' AND status = 'APPROVED') AS total_students,
+                    (SELECT COUNT(*) FROM groups) AS total_groups,
+                    (SELECT COUNT(*) FROM lessons) AS total_lessons,
+                    (SELECT COUNT(*) FROM lessons WHERE is_unlocked = true) AS unlocked_lessons
+            """)
+        )).fetchone()
+        
+        # 2. Bugungi holat (pending counts)
+        pending_row = (await session.execute(
+            text("""
+                SELECT 
+                    (SELECT COUNT(*) FROM submissions WHERE status = 'PENDING') AS pending_subs,
+                    (SELECT COUNT(*) FROM users WHERE status = 'PENDING') AS pending_users,
+                    (SELECT COUNT(*) FROM fines WHERE status = 'PROOF_SUBMITTED') AS pending_fines
+            """)
+        )).fetchone()
+        
+        # 3. Oxirgi 8 ta harakat (recent activity)
+        # APPROVED submissions + new users + paid fines
+        recent_subs = await session.execute(
+            text("""
+                SELECT 
+                    'submission_approved' AS type,
+                    s.reviewed_at AS event_time,
+                    u.full_name AS user_name,
+                    s.score AS score,
+                    s.type AS sub_type,
+                    l.lesson_number AS lesson_num
+                FROM submissions s
+                JOIN users u ON u.id = s.user_id
+                LEFT JOIN lessons l ON l.id = s.lesson_id
+                WHERE s.status = 'APPROVED' AND s.reviewed_at IS NOT NULL
+                ORDER BY s.reviewed_at DESC
+                LIMIT 5
+            """)
+        )
+        
+        new_users = await session.execute(
+            text("""
+                SELECT 
+                    'new_user' AS type,
+                    created_at AS event_time,
+                    full_name AS user_name,
+                    NULL AS score,
+                    NULL AS sub_type,
+                    NULL AS lesson_num
+                FROM users
+                WHERE status = 'APPROVED' AND role = 'STUDENT'
+                ORDER BY created_at DESC
+                LIMIT 3
+            """)
+        )
+        
+        # Combine and sort
+        recent_activity = []
+        for row in recent_subs.fetchall():
+            recent_activity.append({
+                "type": "submission_approved",
+                "time": row.event_time.isoformat() if row.event_time else None,
+                "user_name": row.user_name,
+                "score": row.score or 0,
+                "sub_type": row.sub_type,
+                "lesson_num": row.lesson_num,
+            })
+        
+        for row in new_users.fetchall():
+            recent_activity.append({
+                "type": "new_user",
+                "time": row.event_time.isoformat() if row.event_time else None,
+                "user_name": row.user_name,
+                "score": None,
+                "sub_type": None,
+                "lesson_num": None,
+            })
+        
+        # Sort by time DESC
+        recent_activity.sort(key=lambda x: x["time"] or "", reverse=True)
+        recent_activity = recent_activity[:8]
+
+        return {
+            "stats": {
+                "total_students": int(stats_row.total_students or 0),
+                "total_groups": int(stats_row.total_groups or 0),
+                "total_lessons": int(stats_row.total_lessons or 0),
+                "unlocked_lessons": int(stats_row.unlocked_lessons or 0),
+            },
+            "pending": {
+                "submissions": int(pending_row.pending_subs or 0),
+                "users": int(pending_row.pending_users or 0),
+                "fines": int(pending_row.pending_fines or 0),
+            },
+            "recent_activity": recent_activity,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Xato: {str(e)}")
+
+
 @app.get("/api/stats")
 async def get_stats(session: AsyncSession = Depends(get_db)):
     try:
