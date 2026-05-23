@@ -448,9 +448,10 @@ async def get_student_dashboard(telegram_id: int, session: AsyncSession = Depend
         att = (await session.execute(
             text("""
                 SELECT 
-                    SUM(CASE WHEN status = 'PRESENT' THEN 1 ELSE 0 END) AS present,
-                    SUM(CASE WHEN status = 'LATE' THEN 1 ELSE 0 END) AS late,
-                    SUM(CASE WHEN status = 'ABSENT' THEN 1 ELSE 0 END) AS absent
+                    SUM(CASE WHEN status = 'ON_TIME' THEN 1 ELSE 0 END) AS present,
+                    SUM(CASE WHEN status IN ('LATE_TIER_1', 'LATE_TIER_2', 'LATE_TIER_3') THEN 1 ELSE 0 END) AS late,
+                    SUM(CASE WHEN status = 'ABSENT' THEN 1 ELSE 0 END) AS absent,
+                    SUM(CASE WHEN status = 'EXCUSED' THEN 1 ELSE 0 END) AS excused
                 FROM lesson_attendance
                 WHERE user_id = :uid
             """),
@@ -461,6 +462,7 @@ async def get_student_dashboard(telegram_id: int, session: AsyncSession = Depend
             "present": int(att.present or 0),
             "late": int(att.late or 0),
             "absent": int(att.absent or 0),
+            "excused": int(att.excused or 0),
         }
 
         # 5. Fines
