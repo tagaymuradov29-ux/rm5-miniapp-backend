@@ -302,6 +302,94 @@ async def get_admin_trend(
             total_students_sql += " AND group_id = :gid"
         total_students = (await session.execute(text(total_students_sql), {"gid": group_id} if group_id else {})).fetchone()
         
+        # TOP 3 o'quvchi (bu vazifa bo'yicha)
+        top_students_sql_parts = []
+        if task_type in ("konspekt", "workbook", "amaliy"):
+            sub_type = task_type.upper()
+            top_students_sql_parts.append(f"COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = '{sub_type}'), 0)")
+        elif task_type == "reels":
+            top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED' AND type = 'INSTAGRAM_REELS'), 0)")
+        elif task_type == "test":
+            top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0)")
+        elif task_type == "workshop":
+            top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM workshop_scores WHERE user_id = u.id), 0)")
+        elif task_type == "stories":
+            top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM story_reports WHERE user_id = u.id AND status = 'APPROVED'), 0)")
+        else:
+            # all - umumiy ball
+            top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED'), 0)")
+            top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0)")
+            top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM workshop_scores WHERE user_id = u.id), 0)")
+            top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM story_reports WHERE user_id = u.id AND status = 'APPROVED'), 0)")
+            top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM bonus_points WHERE user_id = u.id), 0)")
+        
+        score_sum = " + ".join(top_students_sql_parts)
+        
+        top_filter = "u.role = 'STUDENT' AND u.status = 'APPROVED'"
+        if group_id:
+            top_filter += f" AND u.group_id = {group_id}"
+        
+        top_sql = f"""
+            SELECT u.id, u.full_name, u.username, g.name AS group_name,
+                ({score_sum}) AS score
+            FROM users u
+            LEFT JOIN groups g ON g.id = u.group_id
+            WHERE {top_filter}
+            ORDER BY score DESC
+            LIMIT 10
+        """
+        top_rows = (await session.execute(text(top_sql))).fetchall()
+        top_students = [{
+            "id": r.id,
+            "full_name": r.full_name,
+            "username": r.username,
+            "group_name": r.group_name,
+            "score": int(r.score or 0),
+        } for r in top_rows]
+        
+        # Problem students - so'nggi ochiq darslarda topshirmaganlar
+        problem_count = 0
+        if task_type in ("konspekt", "workbook", "amaliy") and unlocked_with_data:
+            sub_type = task_type.upper()
+            last_3_lessons = [l["lesson_number"] for l in unlocked_with_data[-3:]]
+            if last_3_lessons:
+                lesson_ids_str = ",".join(str(n) for n in last_3_lessons)
+                problem_filter = "u.role = 'STUDENT' AND u.status = 'APPROVED'"
+                if group_id:
+                    problem_filter += f" AND u.group_id = {group_id}"
+                problem_sql = f"""
+                    SELECT COUNT(*) AS c FROM users u
+                    WHERE {problem_filter}
+                    AND NOT EXISTS (
+                        SELECT 1 FROM submissions s 
+                        JOIN lessons l ON l.id = s.lesson_id
+                        WHERE s.user_id = u.id AND s.status = 'APPROVED' 
+                        AND s.type = '{sub_type}'
+                        AND l.lesson_number IN ({lesson_ids_str})
+                    )
+                """
+                problem_row = (await session.execute(text(problem_sql))).fetchone()
+                problem_count = int(problem_row.c or 0)
+        
+        # Eng faol guruh (faqat umumiy uchun)
+        most_active_group = None
+        completion_pct = 0
+        if group_id is None:
+            active_row = (await session.execute(text("""
+                SELECT g.name, COUNT(u.id) AS cnt 
+                FROM groups g 
+                LEFT JOIN users u ON u.group_id = g.id AND u.role = 'STUDENT' AND u.status = 'APPROVED'
+                GROUP BY g.id, g.name 
+                ORDER BY cnt DESC LIMIT 1
+            """))).fetchone()
+            if active_row:
+                most_active_group = active_row.name
+            
+            comp_row = (await session.execute(text(
+                "SELECT ROUND(COUNT(*) FILTER (WHERE is_unlocked = true) * 100.0 / NULLIF(COUNT(*), 0), 0) AS pct FROM lessons"
+            ))).fetchone()
+            completion_pct = int(comp_row.pct or 0) if comp_row else 0
+        
         return {
             "task_type": task_type,
             "group_id": group_id,
@@ -312,6 +400,10 @@ async def get_admin_trend(
                 "biggest_rise": biggest_rise,
                 "biggest_drop": biggest_drop,
             },
+            "top_students": top_students,
+            "problem_count": problem_count,
+            "most_active_group": most_active_group,
+            "completion_pct": completion_pct,
             "total_students": int(total_students.c or 0),
             "max_score": max_score,
         }
