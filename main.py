@@ -1049,6 +1049,8 @@ async def get_admin_stats_overview(session: AsyncSession = Depends(get_db)):
                         SELECT 
                             COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED'), 0) +
                             COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0) +
+                            COALESCE((SELECT SUM(score) FROM workshop_scores WHERE user_id = u.id), 0) +
+                            COALESCE((SELECT SUM(score) FROM story_reports WHERE user_id = u.id AND status = 'APPROVED'), 0) +
                             COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id), 0) AS total_score
                         FROM users u 
                         WHERE u.group_id = g.id AND u.status = 'APPROVED' AND u.role = 'STUDENT'
@@ -1076,6 +1078,8 @@ async def get_admin_stats_overview(session: AsyncSession = Depends(get_db)):
                 u.id, u.full_name, u.username, g.name AS group_name,
                 COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED'), 0) +
                 COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0) +
+                COALESCE((SELECT SUM(score) FROM workshop_scores WHERE user_id = u.id), 0) +
+                COALESCE((SELECT SUM(score) FROM story_reports WHERE user_id = u.id AND status = 'APPROVED'), 0) +
                 COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id), 0) AS total_score
             FROM users u
             LEFT JOIN groups g ON g.id = u.group_id
