@@ -747,6 +747,185 @@ async def get_admin_student_trend(
         raise HTTPException(status_code=500, detail="Xato: " + str(e))
 
 
+@app.get("/api/admin/submissions/pending")
+async def get_admin_pending_submissions(
+    task_type: str = "all",
+    group_id: int = None,
+    sort: str = "oldest",
+    session: AsyncSession = Depends(get_db),
+):
+    """Baholanmagan vazifalar"""
+    try:
+        # Stats
+        stats_sql = """
+            SELECT 
+                COUNT(*) AS total,
+                SUM(CASE WHEN s.type = 'KONSPEKT' THEN 1 ELSE 0 END) AS konspekt,
+                SUM(CASE WHEN s.type = 'WORKBOOK' THEN 1 ELSE 0 END) AS workbook,
+                SUM(CASE WHEN s.type = 'AMALIY' THEN 1 ELSE 0 END) AS amaliy,
+                SUM(CASE WHEN s.type = 'INSTAGRAM_STORIES' THEN 1 ELSE 0 END) AS stories,
+                SUM(CASE WHEN s.type = 'INSTAGRAM_REELS' THEN 1 ELSE 0 END) AS reels,
+                MIN(s.submitted_at) AS oldest_at
+            FROM submissions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.status = 'PENDING'
+        """
+        stats_params = {}
+        if group_id:
+            stats_sql += " AND u.group_id = :gid"
+            stats_params["gid"] = group_id
+        
+        stats_row = (await session.execute(text(stats_sql), stats_params)).fetchone()
+        
+        # Submissions
+        sub_sql = """
+            SELECT 
+                s.id, s.type, s.file_id, s.file_name, s.file_type, 
+                s.instagram_link, s.is_late, s.submitted_at, s.max_score,
+                u.id AS user_id, u.full_name AS user_full_name, u.username AS user_username,
+                u.group_id, g.name AS group_name, c.full_name AS curator_name,
+                l.lesson_number, l.title AS lesson_title, l.speaker
+            FROM submissions s
+            JOIN users u ON u.id = s.user_id
+            LEFT JOIN groups g ON g.id = u.group_id
+            LEFT JOIN users c ON c.id = g.curator_id
+            LEFT JOIN lessons l ON l.id = s.lesson_id
+            WHERE s.status = 'PENDING'
+        """
+        sub_params = {}
+        if group_id:
+            sub_sql += " AND u.group_id = :gid"
+            sub_params["gid"] = group_id
+        
+        if task_type != "all":
+            type_map_sub = {
+                "konspekt": "KONSPEKT", "workbook": "WORKBOOK", "amaliy": "AMALIY",
+                "stories": "INSTAGRAM_STORIES", "reels": "INSTAGRAM_REELS"
+            }
+            if task_type in type_map_sub:
+                sub_sql += " AND s.type = :tt"
+                sub_params["tt"] = type_map_sub[task_type]
+        
+        # Sorting
+        if sort == "newest":
+            sub_sql += " ORDER BY s.submitted_at DESC"
+        elif sort == "lesson":
+            sub_sql += " ORDER BY l.lesson_number ASC, s.submitted_at ASC"
+        elif sort == "student":
+            sub_sql += " ORDER BY u.full_name ASC"
+        else:  # oldest
+            sub_sql += " ORDER BY s.submitted_at ASC"
+        
+        sub_rows = (await session.execute(text(sub_sql), sub_params)).fetchall()
+        
+        submissions = []
+        for r in sub_rows:
+            submissions.append({
+                "id": r.id,
+                "type": r.type,
+                "user_id": r.user_id,
+                "user_full_name": r.user_full_name,
+                "user_username": r.user_username,
+                "group_id": r.group_id,
+                "group_name": r.group_name,
+                "curator_name": r.curator_name,
+                "lesson_number": r.lesson_number,
+                "lesson_title": r.lesson_title,
+                "speaker": r.speaker,
+                "file_id": r.file_id,
+                "file_name": r.file_name,
+                "file_type": r.file_type,
+                "instagram_link": r.instagram_link,
+                "is_late": r.is_late,
+                "max_score": r.max_score,
+                "submitted_at": r.submitted_at.isoformat() if r.submitted_at else None,
+            })
+        
+        return {
+            "stats": {
+                "total": int(stats_row.total or 0),
+                "by_type": {
+                    "konspekt": int(stats_row.konspekt or 0),
+                    "workbook": int(stats_row.workbook or 0),
+                    "amaliy": int(stats_row.amaliy or 0),
+                    "stories": int(stats_row.stories or 0),
+                    "reels": int(stats_row.reels or 0),
+                },
+                "oldest_at": stats_row.oldest_at.isoformat() if stats_row.oldest_at else None,
+            },
+            "submissions": submissions,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Xato: " + str(e))
+
+
+@app.post("/api/admin/submission/{submission_id}/review")
+async def review_submission(
+    submission_id: int,
+    payload: dict,
+    session: AsyncSession = Depends(get_db),
+):
+    """Vazifani baholash (tasdiqlash/rad etish)"""
+    try:
+        score = payload.get("score", 0)
+        comment = payload.get("comment", "")
+        approved = payload.get("approved", True)
+        is_late = payload.get("is_late", False)
+        reviewer_telegram_id = payload.get("reviewer_telegram_id")
+        
+        # Reviewer ID ni topish
+        reviewer_id = None
+        if reviewer_telegram_id:
+            r = (await session.execute(text(
+                "SELECT id FROM users WHERE telegram_id = :tg"
+            ), {"tg": reviewer_telegram_id})).fetchone()
+            if r:
+                reviewer_id = r.id
+        
+        # Status va ball
+        status_val = "APPROVED" if approved else "REJECTED"
+        final_score = int(score) if approved else 0
+        
+        # DB update
+        update_sql = """
+            UPDATE submissions 
+            SET status = :status, 
+                score = :score, 
+                feedback = :feedback, 
+                reviewer_id = :reviewer_id,
+                is_late = :is_late,
+                reviewed_at = NOW()
+            WHERE id = :sid AND status = 'PENDING'
+            RETURNING id, user_id, type, lesson_id
+        """
+        result = (await session.execute(text(update_sql), {
+            "status": status_val,
+            "score": final_score,
+            "feedback": comment[:500] if comment else None,
+            "reviewer_id": reviewer_id,
+            "is_late": is_late,
+            "sid": submission_id,
+        })).fetchone()
+        
+        if not result:
+            raise HTTPException(status_code=404, detail="Vazifa topilmadi yoki allaqachon baholangan")
+        
+        await session.commit()
+        
+        return {
+            "success": True,
+            "submission_id": result.id,
+            "status": status_val,
+            "score": final_score,
+            "message": "Tasdiqlandi" if approved else "Rad etildi",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(status_code=500, detail="Xato: " + str(e))
+
+
 @app.get("/api/admin/groups")
 async def get_admin_groups(session: AsyncSession = Depends(get_db)):
     """4 ta guruh ma'lumotlari (bot formulasi bilan)"""
