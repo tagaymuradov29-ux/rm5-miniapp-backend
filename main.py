@@ -610,6 +610,143 @@ async def get_admin_trend_drilldown(
         raise HTTPException(status_code=500, detail="Xato: " + str(e))
 
 
+@app.get("/api/admin/student/{user_id}/trend")
+async def get_admin_student_trend(
+    user_id: int,
+    task_type: str = "all",
+    session: AsyncSession = Depends(get_db),
+):
+    """Shaxsiy o'quvchi trend - 16 ta dars uchun"""
+    try:
+        # O'quvchi tekshirish
+        user_row = (await session.execute(text(
+            "SELECT id, full_name, username, group_id FROM users WHERE id = :uid AND role = 'STUDENT'"
+        ), {"uid": user_id})).fetchone()
+        
+        if not user_row:
+            raise HTTPException(status_code=404, detail="O'quvchi topilmadi")
+        
+        # Group nomi
+        group_name = None
+        if user_row.group_id:
+            g_row = (await session.execute(text("SELECT name FROM groups WHERE id = :gid"), {"gid": user_row.group_id})).fetchone()
+            if g_row:
+                group_name = g_row.name
+        
+        # Vazifa turi -> max ball va source
+        type_map = {
+            "konspekt": ("submissions", "KONSPEKT", 10),
+            "workbook": ("submissions", "WORKBOOK", 20),
+            "amaliy": ("submissions", "AMALIY", 50),
+            "test": ("test_scores", None, 20),
+            "workshop": ("workshop_scores", None, 50),
+            "stories": ("story_reports", None, 25),
+            "reels": ("submissions", "INSTAGRAM_REELS", 25),
+        }
+        
+        if task_type == "all":
+            max_score_val = 100
+            # Hammasi - submissions barcha turlari (KONSPEKT+WORKBOOK+AMALIY+REELS)
+            score_sql = """
+                SELECT l.lesson_number, l.is_unlocked, l.title,
+                    COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = :uid AND lesson_id = l.id AND status = 'APPROVED'), 0) +
+                    COALESCE((SELECT score FROM test_scores WHERE user_id = :uid AND lesson_id = l.id LIMIT 1), 0) +
+                    COALESCE((SELECT score FROM workshop_scores WHERE user_id = :uid AND lesson_id = l.id LIMIT 1), 0) +
+                    COALESCE((SELECT score FROM story_reports WHERE user_id = :uid AND lesson_id = l.id AND status = 'APPROVED' LIMIT 1), 0) AS score
+                FROM lessons l
+                ORDER BY l.lesson_number
+            """
+        elif task_type in type_map:
+            source_table, sub_type, max_score_val = type_map[task_type]
+            if source_table == "submissions":
+                score_sql = f"""
+                    SELECT l.lesson_number, l.is_unlocked, l.title,
+                        COALESCE((SELECT MAX(score) FROM submissions WHERE user_id = :uid AND lesson_id = l.id AND status = 'APPROVED' AND type = '{sub_type}'), 0) AS score
+                    FROM lessons l
+                    ORDER BY l.lesson_number
+                """
+            else:
+                score_sql = f"""
+                    SELECT l.lesson_number, l.is_unlocked, l.title,
+                        COALESCE((SELECT score FROM {source_table} WHERE user_id = :uid AND lesson_id = l.id LIMIT 1), 0) AS score
+                    FROM lessons l
+                    ORDER BY l.lesson_number
+                """
+        else:
+            raise HTTPException(status_code=400, detail="Noto'g'ri task_type")
+        
+        rows = (await session.execute(text(score_sql), {"uid": user_id})).fetchall()
+        
+        lessons = []
+        for row in rows:
+            score_val = float(row.score or 0)
+            # Kategoriya
+            if not row.is_unlocked:
+                category = "locked"
+            elif score_val == 0:
+                category = "missing"
+            else:
+                pct = (score_val / max_score_val) * 100 if max_score_val > 0 else 0
+                if pct >= 80:
+                    category = "high"
+                elif pct >= 50:
+                    category = "medium"
+                else:
+                    category = "low"
+            
+            lessons.append({
+                "lesson_number": row.lesson_number,
+                "title": row.title,
+                "is_unlocked": row.is_unlocked,
+                "score": score_val,
+                "category": category,
+            })
+        
+        # Insights - faqat unlocked darslar
+        unlocked = [l for l in lessons if l["is_unlocked"] and l["score"] > 0]
+        
+        best_lesson = max(unlocked, key=lambda x: x["score"]) if unlocked else None
+        worst_lesson = min(unlocked, key=lambda x: x["score"]) if unlocked else None
+        
+        biggest_rise = None
+        biggest_drop = None
+        max_rise = 0
+        max_drop = 0
+        for i in range(1, len(unlocked)):
+            prev = unlocked[i-1]
+            curr = unlocked[i]
+            if prev["score"] > 0:
+                change_pct = ((curr["score"] - prev["score"]) / prev["score"]) * 100
+                if change_pct > max_rise:
+                    max_rise = change_pct
+                    biggest_rise = {"from": prev["lesson_number"], "to": curr["lesson_number"], "percent": round(change_pct, 1), "from_score": prev["score"], "to_score": curr["score"]}
+                if change_pct < max_drop:
+                    max_drop = change_pct
+                    biggest_drop = {"from": prev["lesson_number"], "to": curr["lesson_number"], "percent": round(change_pct, 1), "from_score": prev["score"], "to_score": curr["score"]}
+        
+        return {
+            "user": {
+                "id": user_row.id,
+                "full_name": user_row.full_name,
+                "username": user_row.username,
+                "group_name": group_name,
+            },
+            "task_type": task_type,
+            "max_score": max_score_val,
+            "lessons": lessons,
+            "insights": {
+                "best_lesson": best_lesson,
+                "worst_lesson": worst_lesson,
+                "biggest_rise": biggest_rise,
+                "biggest_drop": biggest_drop,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Xato: " + str(e))
+
+
 @app.get("/api/admin/groups")
 async def get_admin_groups(session: AsyncSession = Depends(get_db)):
     """4 ta guruh ma'lumotlari (bot formulasi bilan)"""
