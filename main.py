@@ -411,6 +411,205 @@ async def get_admin_trend(
         raise HTTPException(status_code=500, detail="Xato: " + str(e))
 
 
+@app.get("/api/admin/trend/drilldown")
+async def get_admin_trend_drilldown(
+    lesson_number: int,
+    task_type: str = "all",
+    drilldown_type: str = "worst",  # best | worst | rise | drop
+    group_id: int = None,
+    session: AsyncSession = Depends(get_db),
+):
+    """Drilldown - har insight uchun batafsil ma'lumot"""
+    try:
+        # Dars ma'lumoti
+        lesson_row = (await session.execute(text(
+            "SELECT id, lesson_number, title, is_unlocked FROM lessons WHERE lesson_number = :ln"
+        ), {"ln": lesson_number})).fetchone()
+        
+        if not lesson_row:
+            raise HTTPException(status_code=404, detail="Dars topilmadi")
+        
+        lesson_id = lesson_row.id
+        lesson_title = lesson_row.title
+        
+        # Vazifa turi -> source SQL va max ball
+        type_map = {
+            "konspekt": ("submissions", "KONSPEKT", 10),
+            "workbook": ("submissions", "WORKBOOK", 20),
+            "amaliy": ("submissions", "AMALIY", 50),
+            "test": ("test_scores", None, 20),
+            "workshop": ("workshop_scores", None, 50),
+            "stories": ("story_reports", None, 25),
+            "reels": ("submissions", "INSTAGRAM_REELS", 25),
+        }
+        
+        if task_type == "all":
+            # Hammasi - umumiy submissions
+            source_table = "submissions"
+            sub_type = None
+            max_score_val = 100
+        elif task_type in type_map:
+            source_table, sub_type, max_score_val = type_map[task_type]
+        else:
+            raise HTTPException(status_code=400, detail="Noto'g'ri task_type")
+        
+        # SQL qurish - har bir o'quvchining shu dars uchun balli
+        group_filter = ""
+        params = {"lid": lesson_id}
+        if group_id:
+            group_filter = " AND u.group_id = :gid"
+            params["gid"] = group_id
+        
+        if source_table == "submissions":
+            sub_filter = f" AND s.type = '{sub_type}'" if sub_type else ""
+            score_sql = f"""
+                SELECT u.id, u.full_name, u.username, g.name AS group_name,
+                    (SELECT s.score FROM submissions s WHERE s.user_id = u.id AND s.lesson_id = :lid AND s.status = 'APPROVED'{sub_filter} ORDER BY s.score DESC LIMIT 1) AS score
+                FROM users u
+                LEFT JOIN groups g ON g.id = u.group_id
+                WHERE u.role = 'STUDENT' AND u.status = 'APPROVED'{group_filter}
+                ORDER BY score DESC NULLS LAST
+            """
+        else:
+            score_sql = f"""
+                SELECT u.id, u.full_name, u.username, g.name AS group_name,
+                    (SELECT score FROM {source_table} WHERE user_id = u.id AND lesson_id = :lid LIMIT 1) AS score
+                FROM users u
+                LEFT JOIN groups g ON g.id = u.group_id
+                WHERE u.role = 'STUDENT' AND u.status = 'APPROVED'{group_filter}
+                ORDER BY score DESC NULLS LAST
+            """
+        
+        rows = (await session.execute(text(score_sql), params)).fetchall()
+        
+        # O'quvchilarni kategoriyalash
+        students = []
+        high_count = 0
+        medium_count = 0
+        low_count = 0
+        missing_count = 0
+        
+        for row in rows:
+            score = row.score
+            if score is None:
+                category = "missing"
+                missing_count += 1
+                score_val = None
+            else:
+                score_val = float(score)
+                # Foiz hisoblash
+                pct = (score_val / max_score_val) * 100 if max_score_val > 0 else 0
+                if pct >= 80:
+                    category = "high"
+                    high_count += 1
+                elif pct >= 50:
+                    category = "medium"
+                    medium_count += 1
+                else:
+                    category = "low"
+                    low_count += 1
+            
+            students.append({
+                "id": row.id,
+                "full_name": row.full_name,
+                "username": row.username,
+                "group_name": row.group_name,
+                "score": score_val,
+                "category": category,
+            })
+        
+        # Drilldown turiga qarab sort
+        if drilldown_type == "worst":
+            # Past ball va topshirmaganlar tepada
+            students.sort(key=lambda s: (
+                0 if s["category"] == "missing" else 1,
+                s["score"] if s["score"] is not None else 0
+            ))
+        elif drilldown_type == "best":
+            # Yuqori ball tepada
+            students.sort(key=lambda s: -(s["score"] or 0))
+        
+        # Rise/Drop uchun previous lesson kerak
+        previous_scores = {}
+        previous_lesson_number = None
+        if drilldown_type in ("rise", "drop"):
+            # Avvalgi unlocked dars
+            prev_row = (await session.execute(text(
+                "SELECT id, lesson_number FROM lessons WHERE lesson_number < :ln AND is_unlocked = true ORDER BY lesson_number DESC LIMIT 1"
+            ), {"ln": lesson_number})).fetchone()
+            
+            if prev_row:
+                previous_lesson_number = prev_row.lesson_number
+                prev_lid = prev_row.id
+                # Avvalgi dars ballarini olish (har o'quvchi uchun)
+                if source_table == "submissions":
+                    sub_filter = f" AND s.type = '{sub_type}'" if sub_type else ""
+                    prev_sql = f"""
+                        SELECT user_id, MAX(score) AS score FROM submissions s
+                        WHERE lesson_id = :lid AND status = 'APPROVED'{sub_filter}
+                        GROUP BY user_id
+                    """
+                else:
+                    prev_sql = f"""
+                        SELECT user_id, MAX(score) AS score FROM {source_table}
+                        WHERE lesson_id = :lid
+                        GROUP BY user_id
+                    """
+                prev_rows = (await session.execute(text(prev_sql), {"lid": prev_lid})).fetchall()
+                previous_scores = {r.user_id: float(r.score or 0) for r in prev_rows}
+            
+            # Har o'quvchiga change_percent qo'shish
+            for st in students:
+                prev = previous_scores.get(st["id"])
+                curr = st["score"]
+                if prev is not None and prev > 0 and curr is not None:
+                    st["previous_score"] = prev
+                    st["change_percent"] = round(((curr - prev) / prev) * 100, 1)
+                else:
+                    st["previous_score"] = None
+                    st["change_percent"] = None
+            
+            # Filter va sort
+            if drilldown_type == "rise":
+                students = [s for s in students if s.get("change_percent") is not None and s["change_percent"] > 0]
+                students.sort(key=lambda s: -s["change_percent"])
+            else:  # drop
+                students = [s for s in students if s.get("change_percent") is not None and s["change_percent"] < 0]
+                students.sort(key=lambda s: s["change_percent"])
+        
+        # Avg va total hisoblash
+        scored = [s for s in students if s["score"] is not None] if drilldown_type in ("best", "worst") else                  [s for s in students if s.get("score") is not None]
+        avg_score = round(sum(s["score"] for s in scored) / len(scored), 1) if scored else 0
+        total_students = len(rows)
+        submitted_count = total_students - missing_count
+        
+        return {
+            "lesson": {
+                "number": lesson_number,
+                "title": lesson_title,
+                "max_score": max_score_val,
+            },
+            "task_type": task_type,
+            "drilldown_type": drilldown_type,
+            "stats": {
+                "high": high_count,
+                "medium": medium_count,
+                "low": low_count,
+                "missing": missing_count,
+                "total": total_students,
+                "submitted": submitted_count,
+                "avg_score": avg_score,
+                "completion_pct": round((submitted_count / total_students) * 100, 0) if total_students > 0 else 0,
+            },
+            "students": students,
+            "previous_lesson_number": previous_lesson_number,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Xato: " + str(e))
+
+
 @app.get("/api/admin/groups")
 async def get_admin_groups(session: AsyncSession = Depends(get_db)):
     """4 ta guruh ma'lumotlari (bot formulasi bilan)"""
