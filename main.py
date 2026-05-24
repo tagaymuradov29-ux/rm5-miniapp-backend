@@ -990,6 +990,131 @@ async def get_admin_lessons(session: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Xato: " + str(e))
 
 
+@app.get("/api/admin/stats/overview")
+async def get_admin_stats_overview(session: AsyncSession = Depends(get_db)):
+    """Statistika tab - umumiy holat"""
+    try:
+        # Umumiy raqamlar
+        totals_sql = """
+            SELECT 
+                (SELECT COUNT(*) FROM users WHERE role = 'STUDENT' AND status = 'APPROVED') AS students,
+                (SELECT COUNT(*) FROM users WHERE role = 'CURATOR' AND status = 'APPROVED') AS curators,
+                (SELECT COUNT(*) FROM users WHERE role = 'ASSISTANT' AND status = 'APPROVED') AS assistants,
+                (SELECT COUNT(*) FROM lessons) AS lessons,
+                (SELECT COUNT(*) FROM lessons WHERE is_unlocked = true) AS lessons_unlocked,
+                (SELECT COUNT(*) FROM submissions WHERE status = 'APPROVED') AS submissions,
+                (SELECT COUNT(*) FROM submissions WHERE submitted_at >= NOW() - INTERVAL '24 hours') AS submissions_24h,
+                (SELECT COUNT(*) FROM submissions WHERE submitted_at >= NOW() - INTERVAL '7 days') AS submissions_7d
+        """
+        totals = (await session.execute(text(totals_sql))).fetchone()
+        
+        max_students = int(totals.students or 46)
+        
+        # Vazifa progress
+        progress_sql = """
+            SELECT 
+                'KONSPEKT' AS type,
+                (SELECT COUNT(DISTINCT user_id) FROM submissions WHERE type = 'KONSPEKT' AND status = 'APPROVED') AS completed
+            UNION ALL
+            SELECT 'WORKBOOK', (SELECT COUNT(DISTINCT user_id) FROM submissions WHERE type = 'WORKBOOK' AND status = 'APPROVED')
+            UNION ALL
+            SELECT 'AMALIY', (SELECT COUNT(DISTINCT user_id) FROM submissions WHERE type = 'AMALIY' AND status = 'APPROVED')
+            UNION ALL
+            SELECT 'TEST', (SELECT COUNT(DISTINCT user_id) FROM test_scores WHERE score > 0)
+            UNION ALL
+            SELECT 'STORIES', (SELECT COUNT(DISTINCT user_id) FROM submissions WHERE type = 'INSTAGRAM_STORIES' AND status = 'APPROVED')
+            UNION ALL
+            SELECT 'REELS', (SELECT COUNT(DISTINCT user_id) FROM submissions WHERE type = 'INSTAGRAM_REELS' AND status = 'APPROVED')
+        """
+        progress_rows = (await session.execute(text(progress_sql))).fetchall()
+        
+        tasks_progress = []
+        for r in progress_rows:
+            completed = int(r.completed or 0)
+            percent = round(completed * 100 / max_students) if max_students > 0 else 0
+            tasks_progress.append({
+                "type": r.type.lower(),
+                "completed": completed,
+                "total": max_students,
+                "percent": percent,
+            })
+        
+        # Guruhlar reytingi (bot formulasi bilan)
+        groups_sql = """
+            SELECT 
+                g.id, g.name,
+                (SELECT COUNT(*) FROM users WHERE group_id = g.id AND status = 'APPROVED' AND role = 'STUDENT') AS students_count,
+                COALESCE((
+                    SELECT ROUND(AVG(total_score)) FROM (
+                        SELECT 
+                            COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED'), 0) +
+                            COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0) +
+                            COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id), 0) AS total_score
+                        FROM users u 
+                        WHERE u.group_id = g.id AND u.status = 'APPROVED' AND u.role = 'STUDENT'
+                    ) sub
+                ), 0) AS avg_score
+            FROM groups g
+            WHERE EXISTS (SELECT 1 FROM users WHERE group_id = g.id AND role = 'STUDENT' AND status = 'APPROVED')
+            ORDER BY avg_score DESC
+            LIMIT 3
+        """
+        group_rows = (await session.execute(text(groups_sql))).fetchall()
+        
+        groups_ranking = []
+        for i, r in enumerate(group_rows):
+            groups_ranking.append({
+                "rank": i + 1,
+                "name": r.name,
+                "avg_score": int(r.avg_score or 0),
+                "students_count": int(r.students_count or 0),
+            })
+        
+        # TOP 5 o'quvchilar
+        top_sql = """
+            SELECT 
+                u.id, u.full_name, u.username, g.name AS group_name,
+                COALESCE((SELECT SUM(score) FROM submissions WHERE user_id = u.id AND status = 'APPROVED'), 0) +
+                COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0) +
+                COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id), 0) AS total_score
+            FROM users u
+            LEFT JOIN groups g ON g.id = u.group_id
+            WHERE u.role = 'STUDENT' AND u.status = 'APPROVED'
+            ORDER BY total_score DESC
+            LIMIT 5
+        """
+        top_rows = (await session.execute(text(top_sql))).fetchall()
+        
+        top_students = []
+        for i, r in enumerate(top_rows):
+            top_students.append({
+                "rank": i + 1,
+                "user_id": r.id,
+                "full_name": r.full_name,
+                "username": r.username,
+                "group_name": r.group_name or "—",
+                "total_score": int(r.total_score or 0),
+            })
+        
+        return {
+            "totals": {
+                "students": int(totals.students or 0),
+                "curators": int(totals.curators or 0),
+                "assistants": int(totals.assistants or 0),
+                "lessons": int(totals.lessons or 0),
+                "lessons_unlocked": int(totals.lessons_unlocked or 0),
+                "submissions": int(totals.submissions or 0),
+                "submissions_24h": int(totals.submissions_24h or 0),
+                "submissions_7d": int(totals.submissions_7d or 0),
+            },
+            "tasks_progress": tasks_progress,
+            "groups_ranking": groups_ranking,
+            "top_students": top_students,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Xato: " + str(e))
+
+
 @app.get("/api/admin/groups")
 async def get_admin_groups(session: AsyncSession = Depends(get_db)):
     """4 ta guruh ma'lumotlari (bot formulasi bilan)"""
