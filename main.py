@@ -926,6 +926,70 @@ async def review_submission(
         raise HTTPException(status_code=500, detail="Xato: " + str(e))
 
 
+@app.get("/api/admin/lessons")
+async def get_admin_lessons(session: AsyncSession = Depends(get_db)):
+    """16 ta dars + statistika"""
+    try:
+        sql = """
+            SELECT 
+                l.id, l.lesson_number, l.title, l.speaker,
+                l.lesson_date, l.workbook_deadline, l.practical_deadline,
+                l.is_unlocked,
+                (SELECT COUNT(*) FROM submissions s 
+                 WHERE s.lesson_id = l.id AND s.type = 'KONSPEKT' AND s.status = 'APPROVED') AS konspekt_count,
+                (SELECT COUNT(*) FROM submissions s 
+                 WHERE s.lesson_id = l.id AND s.type = 'WORKBOOK' AND s.status = 'APPROVED') AS workbook_count,
+                (SELECT COUNT(*) FROM submissions s 
+                 WHERE s.lesson_id = l.id AND s.type = 'AMALIY' AND s.status = 'APPROVED') AS amaliy_count,
+                (SELECT COUNT(*) FROM submissions s 
+                 WHERE s.lesson_id = l.id AND s.type = 'INSTAGRAM_REELS' AND s.status = 'APPROVED') AS reels_count,
+                (SELECT COUNT(*) FROM submissions s 
+                 WHERE s.lesson_id = l.id AND s.status = 'PENDING') AS pending_count,
+                (SELECT AVG(s.score) FROM submissions s 
+                 WHERE s.lesson_id = l.id AND s.status = 'APPROVED') AS avg_score
+            FROM lessons l
+            ORDER BY l.lesson_number
+        """
+        result = await session.execute(text(sql))
+        rows = result.fetchall()
+        
+        # Stats
+        total = len(rows)
+        unlocked = sum(1 for r in rows if r.is_unlocked)
+        locked = total - unlocked
+        
+        # 46 ta approved students = max for each task
+        max_count_q = "SELECT COUNT(*) FROM users WHERE role = 'STUDENT' AND status = 'APPROVED'"
+        max_students = (await session.execute(text(max_count_q))).scalar() or 46
+        
+        lessons = []
+        for r in rows:
+            lessons.append({
+                "id": r.id,
+                "lesson_number": r.lesson_number,
+                "title": r.title,
+                "speaker": r.speaker,
+                "lesson_date": r.lesson_date.isoformat() if r.lesson_date else None,
+                "workbook_deadline": r.workbook_deadline.isoformat() if r.workbook_deadline else None,
+                "practical_deadline": r.practical_deadline.isoformat() if r.practical_deadline else None,
+                "is_unlocked": r.is_unlocked,
+                "konspekt_count": int(r.konspekt_count or 0),
+                "workbook_count": int(r.workbook_count or 0),
+                "amaliy_count": int(r.amaliy_count or 0),
+                "reels_count": int(r.reels_count or 0),
+                "pending_count": int(r.pending_count or 0),
+                "avg_score": float(r.avg_score) if r.avg_score else 0,
+                "max_students": max_students,
+            })
+        
+        return {
+            "stats": {"total": total, "unlocked": unlocked, "locked": locked, "max_students": max_students},
+            "lessons": lessons,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Xato: " + str(e))
+
+
 @app.get("/api/admin/groups")
 async def get_admin_groups(session: AsyncSession = Depends(get_db)):
     """4 ta guruh ma'lumotlari (bot formulasi bilan)"""
