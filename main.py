@@ -321,7 +321,7 @@ async def get_admin_trend(
             top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0)")
             top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM workshop_scores WHERE user_id = u.id), 0)")
             top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM story_reports WHERE user_id = u.id AND status = 'APPROVED'), 0)")
-            top_students_sql_parts.append("COALESCE((SELECT SUM(score) FROM bonus_points WHERE user_id = u.id), 0)")
+            top_students_sql_parts.append("COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id), 0)")
         
         score_sum = " + ".join(top_students_sql_parts)
         
