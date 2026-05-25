@@ -1468,16 +1468,34 @@ async def get_student_scores(telegram_id: int, session: AsyncSession = Depends(g
         konspekt = scores_by_type.get("KONSPEKT", 0)
         workbook = scores_by_type.get("WORKBOOK", 0)
         amaliy = scores_by_type.get("AMALIY", 0)
+        reels = scores_by_type.get("INSTAGRAM_REELS", 0)
+        stories_subs = scores_by_type.get("INSTAGRAM_STORIES", 0)
 
-        total = konspekt + workbook + amaliy + test_total + workshop_total + ig_total
+        # Story reports alohida jadval
+        story_reports_total = (await session.execute(
+            text("SELECT COALESCE(SUM(score), 0) AS total FROM story_reports WHERE user_id = :uid AND status = 'APPROVED'"),
+            {"uid": user_id},
+        )).scalar() or 0
+
+        # Bonus points
+        bonus_total = (await session.execute(
+            text("SELECT COALESCE(SUM(amount), 0) AS total FROM bonus_points WHERE user_id = :uid"),
+            {"uid": user_id},
+        )).scalar() or 0
+
+        total = (konspekt + workbook + amaliy + reels + stories_subs +
+                 test_total + workshop_total + ig_total + story_reports_total + bonus_total)
 
         return {
             "konspekt": konspekt,
             "workbook": workbook,
             "amaliy": amaliy,
+            "reels": reels,
+            "stories": stories_subs + story_reports_total,
             "test": test_total,
             "workshop": workshop_total,
             "instagram": ig_total,
+            "bonus": bonus_total,
             "total": total,
             "max_total": 1970,
             "percentage": round((total / 1970) * 100, 1),
