@@ -990,6 +990,42 @@ async def get_admin_lessons(session: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Xato: " + str(e))
 
 
+@app.patch("/api/admin/lesson/{lesson_id}/toggle")
+async def toggle_lesson(lesson_id: int, session: AsyncSession = Depends(get_db)):
+    """Darsni ochish yoki yopish (toggle)"""
+    try:
+        # Hozirgi holatni olamiz
+        check = (await session.execute(text(
+            "SELECT id, lesson_number, title, is_unlocked FROM lessons WHERE id = :lid"
+        ), {"lid": lesson_id})).fetchone()
+        
+        if not check:
+            raise HTTPException(status_code=404, detail="Dars topilmadi")
+        
+        new_status = not check.is_unlocked
+        
+        # Yangilash
+        await session.execute(text(
+            "UPDATE lessons SET is_unlocked = :s WHERE id = :lid"
+        ), {"s": new_status, "lid": lesson_id})
+        
+        await session.commit()
+        
+        return {
+            "success": True,
+            "lesson_id": lesson_id,
+            "lesson_number": check.lesson_number,
+            "title": check.title,
+            "is_unlocked": new_status,
+            "message": ("Dars ochildi" if new_status else "Dars yopildi"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(status_code=500, detail="Xato: " + str(e))
+
+
 @app.get("/api/admin/stats/overview")
 async def get_admin_stats_overview(session: AsyncSession = Depends(get_db)):
     """Statistika tab - umumiy holat"""
