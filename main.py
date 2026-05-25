@@ -1302,6 +1302,7 @@ async def get_admin_students(session: AsyncSession = Depends(get_db)):
                 COALESCE((SELECT SUM(score) FROM test_scores WHERE user_id = u.id), 0) AS test_score,
                 COALESCE((SELECT SUM(score) FROM workshop_scores WHERE user_id = u.id), 0) AS workshop_score,
                 COALESCE((SELECT SUM(score) FROM story_reports WHERE user_id = u.id AND status = 'APPROVED'), 0) AS story_score,
+                COALESCE((SELECT SUM(week_total) FROM instagram_weeks WHERE user_id = u.id), 0) AS ig_weeks_score,
                 COALESCE((SELECT SUM(amount) FROM bonus_points WHERE user_id = u.id), 0) AS bonus_score
             FROM users u
             LEFT JOIN groups g ON g.id = u.group_id
@@ -1314,7 +1315,7 @@ async def get_admin_students(session: AsyncSession = Depends(get_db)):
         for row in students_res.fetchall():
             # Bot formulasi: sub_score'da KONSPEKT+WORKBOOK+AMALIY+REELS+STORIES_OLD bor
             # bonus_score'da hammasi yig'ilgan (har turi uchun)
-            total = int(row.sub_score) + int(row.test_score) + int(row.workshop_score) + int(row.story_score) + int(row.bonus_score)
+            total = int(row.sub_score) + int(row.test_score) + int(row.workshop_score) + int(row.story_score) + int(row.ig_weeks_score) + int(row.bonus_score)
             students.append({
                 "id": row.id,
                 "telegram_id": row.telegram_id,
